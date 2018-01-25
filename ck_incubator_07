@@ -1,0 +1,203 @@
+/*
+   Incubator for Christopher Kaltenbach
+   by Michael LeBlanc
+   version 07
+
+   Concepts proved for:
+   piezo clicker
+   128x64 OLED display
+   debounced button switches using 4584
+   DS18B20 temperature sensor
+   determining and actuating heater and fan
+   varying PWM on heater to avoid overshoot
+   4N28 Optoisolator to prevent Heater PWM from affecting OLED
+*/
+
+
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+#define OLED_RESET 4
+Adafruit_SSD1306 display(OLED_RESET);
+
+// 10-second timer variables:
+unsigned long previousMillis = 0;
+const long interval = 1000; // the interval (in milliseconds) between temperature checks
+
+int chirpPin = 5;   // set up the piezo annunciator
+int heaterPin = 6;  // set up the heater port
+int fanPin = 7;     // set up the fan port
+
+int tempC = 24;     // this is the target temperature; we will set the default to 24
+int tempDirection;  // this indicates whether the user sets the target above or below
+                    // the current temperature
+
+int currTemp;       // this variable will hold the current temperature when we get it
+int diffTemp;       // this variable will hold the difference between the two temps
+
+// Setup for DS18B20 temperature sensor
+// Data wire is plugged into D8 on the Arduino
+#define ONE_WIRE_BUS 8
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature. 
+DallasTemperature sensors(&oneWire);
+
+
+
+void setup() {
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  // initialize with the I2C addr 0x3C (for the 128x64)
+  // init done
+
+  // Show image buffer on the display hardware.
+  // Since the buffer is intialized with an Adafruit splashscreen
+  // internally, this will display the splashscreen.
+
+  // Clear the buffer.
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.println("Ready!");
+  display.display();        // display default, before taking readings
+
+  pinMode(2, INPUT);        // set up the 'target temp lower' button
+  pinMode(3, INPUT);        // set up the 'target temp higher' button
+  pinMode(fanPin, OUTPUT);  // set up the fan port
+  pinMode(chirpPin, OUTPUT);// set up the piezo alarm port
+
+
+  // set up external interrupts for the two control buttons
+  attachInterrupt(digitalPinToInterrupt(2), UpButton, RISING);
+  attachInterrupt(digitalPinToInterrupt(3), DownButton, RISING);
+
+  sensors.begin();  // Start up the temperature library
+
+  //Thermometer();  // initial temperature check
+  delay(1000);      // wait a second to let the sensor settle
+
+  Chirp();          // let us know when setup is complete
+
+  // CLear the display
+  display.clearDisplay();
+  display.display();        
+}
+
+void loop() {
+
+  unsigned long currentMillis = millis();
+  // we don't want to check the temperature on every loop pass--we only want to 
+  // do this after a set interval. This part of the code sets a little timer:
+  // wait until the interval time has passed, and then execute the following routines
+  // otherwise, loop back and check again
+  
+  if (currentMillis - previousMillis >= interval) {
+    // save the last time you checked the timer
+    previousMillis = currentMillis;
+
+    Thermometer();
+    HeatCool();       // turn on heater or fan, if required
+    PrintDisplay();   // update the display
+  }
+}
+
+
+
+  void PrintDisplay() {
+    // Print the target temperature
+    display.setTextColor(WHITE);
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("TARGET:");
+    display.setTextSize(2);
+    display.setCursor(0, 10);
+    display.print(tempC);
+    display.setTextSize(1);
+    display.print((char)247);
+    display.setTextSize(2);
+    display.print("C");
+    // Print the current temperature
+    display.setTextSize(1);
+    display.setCursor(0, 32);
+    display.print("CURRENT:");
+    display.setTextSize(2);
+    display.setCursor(0, 42);
+    display.print(currTemp);
+    display.setTextSize(1);
+    display.print((char)247);
+    display.setTextSize(2);
+    display.print("C");
+
+    display.display();
+    display.clearDisplay();
+  }
+
+  void Chirp() {
+    // provide audible feedback when a button is pressed
+    digitalWrite(chirpPin, 1);
+    delay(1);
+    digitalWrite(chirpPin, 0);
+  }
+
+  void UpButton() {
+    // the 'target temp higher' button is pressed
+    tempDirection = 1;
+    tempC = tempC + 1;
+    Chirp();
+  }
+
+  void DownButton() {
+    // the 'target temp lower' button is pressed
+    tempDirection = -1;
+    tempC = tempC - 1;
+    Chirp();
+  }
+
+  void Thermometer() {
+    // get the temperature and put it in currTemp
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    currTemp = sensors.getTempCByIndex(0);
+  }
+
+  void HeatCool() {
+
+    if (currTemp < tempC) { // if the current temperature is lower than the requested temperature,
+      // ensure that fan is turned off
+      digitalWrite(fanPin, LOW);
+      
+      // turn on heater
+      // now determine how much the current temp is lower
+      diffTemp = tempC - currTemp;
+      if (diffTemp > 2) {
+        analogWrite(heaterPin, 80);  // 1700mA to peltier 20W
+      } else if (diffTemp == 2) {
+        analogWrite(heaterPin, 40);   // 1000mA to peltier 12W
+      } else if (diffTemp == 1) {
+        analogWrite(heaterPin, 20);   // 400mA to peltier 5W
+      }
+    }
+
+    if (currTemp > tempC) { // if the current temperature is higher than the requested temperature,
+      // ensure that heater is turned off
+      analogWrite(heaterPin, 0);
+      
+      // turn on fan
+      digitalWrite(fanPin, HIGH);
+    }
+
+    if (currTemp == tempC) { //equilibrium achieved, turn off heater and fan
+      digitalWrite(fanPin, LOW);
+      analogWrite(heaterPin, 0);
+    }
+
+
+  }
